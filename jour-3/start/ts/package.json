@@ -1,0 +1,25 @@
+{
+  "name": "bank",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "start": "node --env-file=.env packages/app/src/api/server.ts",
+    "test": "node --env-file=.env node_modules/vitest/vitest.mjs run",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  },
+  "allowScripts": {
+    "fsevents": false
+  }
+}

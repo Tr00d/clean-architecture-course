@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Bank.Domain\Bank.Domain.csproj" />
+    <ProjectReference Include="..\Bank.Adapters.Supabase\Bank.Adapters.Supabase.csproj" />
+    <ProjectReference Include="..\Bank.Adapters.Time\Bank.Adapters.Time.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.14" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.local.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

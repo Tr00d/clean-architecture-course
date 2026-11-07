@@ -1,0 +1,29 @@
+{
+  "name": "bank",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --env-file=.env src/api/server.ts",
+    "test": "node --env-file=.env node_modules/vitest/vitest.mjs run",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.119.0",
+    "express": "^5.3.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.3.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  },
+  "allowScripts": {
+    "fsevents": false
+  }
+}

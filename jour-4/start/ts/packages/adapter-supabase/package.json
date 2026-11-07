@@ -1,0 +1,13 @@
+{
+  "name": "@bank/adapter-supabase",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/supabaseOperations.ts"
+  },
+  "dependencies": {
+    "@bank/domain": "*",
+    "@supabase/supabase-js": "^2.119.0"
+  }
+}

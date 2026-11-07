@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Bank.Adapters.Cli\Bank.Adapters.Cli.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Bank.Domain.Tests\InMemoryOperations.cs" Link="InMemoryOperations.cs" />
+    <Compile Include="..\Bank.Domain.Tests\FixedClock.cs" Link="FixedClock.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+    <PackageReference Include="xunit.v3" Version="4.0.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

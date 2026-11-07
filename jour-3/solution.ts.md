@@ -1,0 +1,1188 @@
+<!-- Généré depuis solution.src.md. Modifiez la source, pas ce fichier. -->
+
+# Jour 3 : Solution (TypeScript)
+
+Ce guide reprend pas à pas la migration vers l'hexagone, les deux règles liées au temps et l'écran du DAB. Il part du projet de `jour-3/start/`.
+
+## Le projet de départ
+
+Ce projet est un espace de travail npm : `packages/app` contient le code N-tier, et `packages/domain` le domaine. Il a son propre `.env`, qui n'est pas versionné : si vous ne l'avez pas encore, suivez le README du projet pour le créer à la racine de `jour-3/start/ts`.
+
+Démarrez la base, puis installez les dépendances et lancez les tests depuis `jour-3/start/ts` :
+
+```bash
+npm install
+npm test
+```
+
+Les 16 tests passent : les 10 tests du domaine, et les 6 tests du premier jour. Toutes les commandes de ce guide se lancent depuis ce dossier.
+
+---
+
+## Étape 1 : Brancher le domaine
+
+On ne réécrit pas tout d'un coup. L'ancien code et le nouveau cohabitent pendant la migration, et les tests restent verts après chaque étape.
+
+### Créer les adapters sortants
+
+Le domaine a deux ports sortants : les opérations et l'horloge. Chacun a son adapter, dans son propre projet : l'horloge système n'a pas de lien avec Supabase, et l'écran du DAB en aura besoin lui aussi.
+
+Créez les deux paquets :
+
+`packages/adapter-supabase/package.json`
+
+```json
+{
+  "name": "@bank/adapter-supabase",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/supabaseOperations.ts"
+  },
+  "dependencies": {
+    "@bank/domain": "*",
+    "@supabase/supabase-js": "^2.119.0"
+  }
+}
+```
+
+`packages/adapter-time/package.json`
+
+```json
+{
+  "name": "@bank/adapter-time",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/systemClock.ts"
+  },
+  "dependencies": {
+    "@bank/domain": "*"
+  }
+}
+```
+
+Ces paquets dépendent du domaine : c'est le sens de dépendance de l'hexagone. `packages/domain` ne change pas, et ne dépend toujours de rien.
+
+`packages/adapter-time/src/systemClock.ts`
+
+```typescript
+import type { Clock } from "@bank/domain";
+
+export class SystemClock implements Clock {
+  now(): Date {
+    return new Date();
+  }
+}
+```
+
+Copiez `operationRecord.ts` dans le nouveau paquet. L'identifiant de la ligne reste ici : il concerne la base, pas le domaine.
+
+`packages/adapter-supabase/src/operationRecord.ts`
+
+```typescript
+export interface OperationRecord {
+  id: number;
+  account_id: number;
+  amount: number;
+  date: string;
+}
+```
+
+L'adapter traduit dans les deux sens. Il charge l'historique du compte et n'insère que `newOperations` : c'est le compte qui sait ce qui est nouveau.
+
+`packages/adapter-supabase/src/supabaseOperations.ts`
+
+```typescript
+import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { Account, Amount } from "@bank/domain";
+import type { AccountId, Operations } from "@bank/domain";
+import type { OperationRecord } from "./operationRecord.ts";
+
+export class SupabaseOperations implements Operations {
+  private readonly client: SupabaseClient;
+
+  constructor(url: string, key: string) {
+    this.client = createClient(url, key);
+  }
+
+  async accountOf(accountId: AccountId): Promise<Account> {
+    const { data, error } = await this.client
+      .from("operations")
+      .select()
+      .eq("account_id", accountId.value)
+      .order("date")
+      .order("id");
+
+    if (error) {
+      throw error;
+    }
+
+    const records: OperationRecord[] = data;
+    const history = records.map((record) => ({
+      amount: new Amount(record.amount),
+      date: new Date(record.date)
+    }));
+
+    return new Account(accountId, history);
+  }
+
+  async save(account: Account): Promise<void> {
+    const records = account.newOperations.map((operation) => ({
+      account_id: account.id.value,
+      amount: operation.amount.value,
+      date: operation.date.toISOString()
+    }));
+
+    const { error } = await this.client.from("operations").insert(records);
+
+    if (error) {
+      throw error;
+    }
+  }
+}
+```
+
+La base renvoie les dates sous forme de texte. `new Date(...)`, qui était dans le service, passe dans l'adapter : le domaine n'a pas à connaître ce détail.
+
+Installez les nouveaux paquets, puis lancez les tests :
+
+```bash
+npm install
+npm test
+```
+
+Les 16 tests passent. Rien n'utilise encore les adapters.
+
+Vérifiez maintenant que le domaine est protégé. Supabase est installé dans l'espace de travail, mais pas pour lui. Ajoutez temporairement cette ligne à `packages/domain/src/index.ts` :
+
+```typescript
+import { createClient } from "@supabase/supabase-js";
+```
+
+`npm run typecheck` échoue : le domaine n'a pas accès à cette librairie, car il ne la déclare pas. Retirez la ligne.
+
+### Faire passer les tests par le nouveau service
+
+Ces tests vérifient les comportements de l'application depuis le premier jour. On les fait passer par l'`AccountService` du domaine et par la vraie base, sans changer ce qu'ils vérifient : ils deviennent les tests de l'adapter Supabase.
+
+Ajoutez les dépendances à `packages/app/package.json` :
+
+```json
+  "dependencies": {
+    "@bank/adapter-supabase": "*",
+    "@bank/adapter-time": "*",
+    "@bank/domain": "*",
+    "@supabase/supabase-js": "^2.119.0",
+    "express": "^5.3.0"
+  },
+```
+
+Lancez `npm install`, puis remplacez `packages/app/tests/accountService.test.ts`. Chaque test crée toujours son service, et seuls les types changent :
+
+```typescript
+import { createClient } from "@supabase/supabase-js";
+import { afterEach, beforeEach, expect, test } from "vitest";
+import { SupabaseOperations } from "@bank/adapter-supabase";
+import { SystemClock } from "@bank/adapter-time";
+import { AccountId, AccountService, Amount, InsufficientFundsError } from "@bank/domain";
+
+const accountId = new AccountId(42);
+
+function createService(): AccountService {
+  const operations = new SupabaseOperations(process.env.SUPABASE_URL!, process.env.SUPABASE_KEY!);
+
+  return new AccountService(operations, new SystemClock());
+}
+
+async function clearOperations(): Promise<void> {
+  const client = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_KEY!);
+
+  const { error } = await client.from("operations").delete().eq("account_id", accountId.value);
+
+  if (error) {
+    throw error;
+  }
+}
+
+beforeEach(clearOperations);
+afterEach(clearOperations);
+
+test("the statement is empty when the account has no operations", async () => {
+  const service = createService();
+
+  const statement = await service.printStatement(accountId);
+
+  expect(statement).toEqual([]);
+});
+
+test("the statement lists the operations, newest first, with the running balance", async () => {
+  const service = createService();
+  await service.deposit(accountId, new Amount(1000));
+  await service.deposit(accountId, new Amount(2000));
+  await service.withdraw(accountId, new Amount(500));
+
+  const statement = await service.printStatement(accountId);
+
+  expect(statement.map((line) => line.amount.value)).toEqual([-500, 2000, 1000]);
+  expect(statement.map((line) => line.balance.value)).toEqual([2500, 3000, 1000]);
+});
+
+test("the statement dates the operations with the current time", async () => {
+  const service = createService();
+  const before = Date.now();
+
+  await service.deposit(accountId, new Amount(1000));
+
+  const [line] = await service.printStatement(accountId);
+  expect(line.date.getTime()).toBeGreaterThanOrEqual(before - 1000);
+  expect(line.date.getTime()).toBeLessThanOrEqual(Date.now());
+});
+
+test("a withdrawal is refused when above the balance", async () => {
+  const service = createService();
+  await service.deposit(accountId, new Amount(100));
+
+  await expect(service.withdraw(accountId, new Amount(100.01))).rejects.toThrow(InsufficientFundsError);
+
+  const statement = await service.printStatement(accountId);
+  expect(statement).toHaveLength(1);
+  expect(statement[0].balance).toEqual(new Amount(100));
+});
+
+test("a withdrawal is accepted when equal to the balance", async () => {
+  const service = createService();
+  await service.deposit(accountId, new Amount(100));
+
+  await service.withdraw(accountId, new Amount(100));
+
+  const statement = await service.printStatement(accountId);
+  expect(statement[0].balance).toEqual(Amount.zero);
+});
+```
+
+Les 16 tests passent : l'adapter Supabase se comporte comme l'ancien service. Le test de bout en bout passe toujours par l'ancien service, qui n'a pas changé.
+
+### Brancher le contrôleur
+
+C'est ici que l'application bascule, et que les ports entrants déclarés hier servent enfin. Le contrôleur devient un adapter entrant : il traduit le HTTP vers le vocabulaire du domaine, et ne dépend que des ports, pas du service qui les implémente.
+
+Remplacez `packages/app/src/api/accountsController.ts` :
+
+```typescript
+import { Router } from "express";
+import type { Request, Response } from "express";
+import { AccountId, Amount, InsufficientFundsError } from "@bank/domain";
+import type { ForDepositing, ForPrintingStatements, ForWithdrawing } from "@bank/domain";
+import type { AmountRequest, StatementLineResponse } from "./models.ts";
+
+export function accountsController(
+  depositing: ForDepositing,
+  withdrawing: ForWithdrawing,
+  printingStatements: ForPrintingStatements
+): Router {
+  const router = Router();
+
+  router.param("accountId", (_request, response, next, accountId) => {
+    if (Number.isInteger(Number(accountId))) {
+      next();
+    } else {
+      response.sendStatus(404);
+    }
+  });
+
+  router.get("/accounts/:accountId/operations", async (request: Request, response: Response<StatementLineResponse[]>) => {
+    const lines = await printingStatements.printStatement(new AccountId(Number(request.params.accountId)));
+
+    response.json(lines.map(({ date, amount, balance }) => ({ date, amount: amount.value, balance: balance.value })));
+  });
+
+  router.post("/accounts/:accountId/deposits", async (request: Request, response: Response) => {
+    const { amount } = request.body as AmountRequest;
+
+    await depositing.deposit(new AccountId(Number(request.params.accountId)), new Amount(amount));
+    response.sendStatus(201);
+  });
+
+  router.post("/accounts/:accountId/withdrawals", async (request: Request, response: Response) => {
+    const { amount } = request.body as AmountRequest;
+
+    try {
+      await withdrawing.withdraw(new AccountId(Number(request.params.accountId)), new Amount(amount));
+      response.sendStatus(201);
+    } catch (error) {
+      if (error instanceof InsufficientFundsError) {
+        response.status(422).send(error.message);
+      } else {
+        throw error;
+      }
+    }
+  });
+
+  return router;
+}
+```
+
+`app.ts` assemble l'application : c'est le seul endroit qui connaît à la fois les ports et ce qui les implémente. Remplacez-le :
+
+```typescript
+import express from "express";
+import type { Express } from "express";
+import { SupabaseOperations } from "@bank/adapter-supabase";
+import { SystemClock } from "@bank/adapter-time";
+import { AccountService } from "@bank/domain";
+import { accountsController } from "./accountsController.ts";
+
+export function createApp(): Express {
+  const operations = new SupabaseOperations(process.env.SUPABASE_URL!, process.env.SUPABASE_KEY!);
+  const service = new AccountService(operations, new SystemClock());
+  const app = express();
+
+  app.use(express.json());
+  app.use(accountsController(service, service, service));
+
+  return app;
+}
+```
+
+Les 16 tests passent. Le test de bout en bout traverse maintenant le contrôleur, les ports entrants, le domaine et l'adapter Supabase, sans avoir été modifié.
+
+### Supprimer l'ancien service
+
+Plus rien n'utilise les anciennes couches.
+
+Supprimez les dossiers `packages/app/src/business` et `packages/app/src/data`.
+
+Seuls les tests utilisent encore le SDK, pour nettoyer la base. Dans `packages/app/package.json`, déplacez `@supabase/supabase-js` dans `devDependencies`, puis lancez `npm install`. Les 16 tests passent.
+
+### Renommer le projet d'API
+
+Cette étape est facultative, mais le nom dit maintenant ce que le projet est devenu : un adapter parmi d'autres.
+
+1. Renommez le dossier `packages/app` en `packages/adapter-rest`
+2. Dans son `package.json`, changez `name` en `@bank/adapter-rest`
+3. Déplacez les fichiers de `src/api` directement dans `src`, et corrigez l'import de `tests/statement.test.ts` en `../src/app.ts`
+4. Dans le `package.json` de la racine, faites pointer le script `start` vers `packages/adapter-rest/src/server.ts`
+5. Lancez `npm install`
+
+Les 16 tests passent. Vérifiez à la main que le refus de retrait fonctionne toujours, avec l'API démarrée :
+
+```bash
+npm start
+```
+
+```bash
+curl -X POST http://localhost:5122/accounts/1/withdrawals \
+  -H "Content-Type: application/json" \
+  -d '{ "amount": 100000 }'
+```
+
+L'API répond `422` avec le message de l'erreur.
+
+---
+
+## Étape 2 : Des règles qui dépendent du temps
+
+Chaque mob implémente une règle. Ce guide présente les deux à la suite : si vous n'en avez fait qu'une, le nombre de tests sera différent.
+
+Les deux règles vivent dans le compte. Le retrait y reçoit déjà la date : pour tester "24 heures plus tard" ou "à 23 heures", il suffit de passer une autre date. Aucune attente, aucune base, et même pas besoin de l'horloge : elle ne sert qu'au service.
+
+Tous les tests de cette étape vont dans `packages/domain/tests/account.test.ts`, et le code dans `packages/domain/src/models/account.ts`.
+
+### Première règle : la limite sur 24 heures
+
+#### Un retrait au-dessus de la limite est refusé
+
+**Rouge**
+
+Pour que le test puisse s'exécuter, créez `packages/domain/src/models/withdrawalLimitExceededError.ts` :
+
+```typescript
+import type { Amount } from "./amount.ts";
+
+export class WithdrawalLimitExceededError extends Error {
+  constructor(limit: Amount) {
+    super(`Withdrawal limit exceeded: at most ${limit.value} can be withdrawn over 24 hours.`);
+  }
+}
+```
+
+Ajoutez ce test, et importez `WithdrawalLimitExceededError` :
+
+```typescript
+test("a withdrawal is refused when above the limit", () => {
+  const account = new Account(id, []);
+  account.deposit(new Amount(5000), date);
+
+  expect(() => account.withdraw(new Amount(2500.01), date)).toThrow(WithdrawalLimitExceededError);
+
+  expect(account.balance).toEqual(new Amount(5000));
+});
+```
+
+Le test échoue, car aucune erreur n'est levée.
+
+**Vert**
+
+Dans `account.ts`, importez `WithdrawalLimitExceededError`, et ajoutez avant la classe :
+
+```typescript
+const withdrawalLimit = new Amount(2500);
+```
+
+Dans `withdraw`, après la vérification du solde :
+
+```typescript
+    if (amount.isGreaterThan(withdrawalLimit)) {
+      throw new WithdrawalLimitExceededError(withdrawalLimit);
+    }
+```
+
+Les 11 tests du domaine passent.
+
+#### Les retraits s'additionnent
+
+**Rouge**
+
+Ajoutez ce test, et cette fonction en haut de `account.test.ts` :
+
+```typescript
+function hoursAfter(start: Date, hours: number): Date {
+  return new Date(start.getTime() + hours * 60 * 60 * 1000);
+}
+```
+
+```typescript
+test("a withdrawal is refused when withdrawals add up above the limit", () => {
+  const account = new Account(id, []);
+  account.deposit(new Amount(5000), date);
+  account.withdraw(new Amount(1500), date);
+
+  expect(() => account.withdraw(new Amount(1500), hoursAfter(date, 1))).toThrow(WithdrawalLimitExceededError);
+});
+```
+
+Le test échoue : chaque retrait est sous la limite, pris séparément.
+
+**Vert**
+
+Ajoutez à `Account` :
+
+```typescript
+  private withdrawn(): Amount {
+    return this.allOperations
+      .filter((operation) => operation.amount.isLessThan(Amount.zero))
+      .reduce((total, operation) => total.plus(operation.amount.negated()), Amount.zero);
+  }
+```
+
+Et remplacez la condition dans `withdraw` :
+
+```typescript
+    if (this.withdrawn().plus(amount).isGreaterThan(withdrawalLimit)) {
+```
+
+Les 12 tests du domaine passent.
+
+#### La limite porte sur 24 heures glissantes
+
+**Rouge**
+
+```typescript
+test("a withdrawal is accepted when previous withdrawals are 24 hours old", () => {
+  const account = new Account(id, []);
+  account.deposit(new Amount(5000), date);
+  account.withdraw(new Amount(1500), date);
+
+  account.withdraw(new Amount(1500), hoursAfter(date, 24));
+
+  expect(account.balance).toEqual(new Amount(2000));
+});
+```
+
+Le test échoue : tous les retraits comptent, quelle que soit leur date.
+
+**Vert**
+
+Ajoutez avant la classe :
+
+```typescript
+const dayInMilliseconds = 24 * 60 * 60 * 1000;
+```
+
+Remplacez `withdrawn` dans `Account` :
+
+```typescript
+  private withdrawnInThe24HoursBefore(date: Date): Amount {
+    return this.allOperations
+      .filter((operation) => operation.amount.isLessThan(Amount.zero))
+      .filter((operation) => operation.date.getTime() > date.getTime() - dayInMilliseconds)
+      .reduce((total, operation) => total.plus(operation.amount.negated()), Amount.zero);
+  }
+```
+
+Et la condition dans `withdraw` :
+
+```typescript
+    if (this.withdrawnInThe24HoursBefore(date).plus(amount).isGreaterThan(withdrawalLimit)) {
+```
+
+Les 13 tests du domaine passent.
+
+#### Un retrait égal à la limite est accepté
+
+Ce cas est déjà couvert par le premier cycle : le test passera du premier coup, et il ne pilote aucun code. On sort donc du TDD le temps d'un test, pour fixer ce comportement à la limite.
+
+```typescript
+test("a withdrawal is accepted when equal to the limit", () => {
+  const account = new Account(id, []);
+  account.deposit(new Amount(5000), date);
+
+  account.withdraw(new Amount(2500), date);
+
+  expect(account.balance).toEqual(new Amount(2500));
+});
+```
+
+Un test qui n'a jamais échoué ne prouve rien. Vérifiez qu'il peut échouer en remplaçant temporairement la condition par `!withdrawalLimit.isGreaterThan(this.withdrawnInThe24HoursBefore(date).plus(amount))` : le test échoue. Remettez la condition. Les 14 tests du domaine passent.
+
+### Deuxième règle : la limite de nuit
+
+#### Un retrait au-dessus de la limite de nuit est refusé dès 22 heures
+
+**Rouge**
+
+Pour que le test puisse s'exécuter, créez `packages/domain/src/models/nightWithdrawalLimitExceededError.ts` :
+
+```typescript
+import type { Amount } from "./amount.ts";
+
+export class NightWithdrawalLimitExceededError extends Error {
+  constructor(limit: Amount) {
+    super(`Night withdrawal limit exceeded: at most ${limit.value} can be withdrawn between 22:00 and 06:00.`);
+  }
+}
+```
+
+Ajoutez ce test, et importez `NightWithdrawalLimitExceededError` :
+
+```typescript
+test("a withdrawal is refused when above the night limit, at nightfall", () => {
+  const account = new Account(id, []);
+  account.deposit(new Amount(1000), date);
+  const nightfall = new Date("2021-01-10T22:00:00Z");
+
+  expect(() => account.withdraw(new Amount(500.01), nightfall)).toThrow(NightWithdrawalLimitExceededError);
+
+  expect(account.balance).toEqual(new Amount(1000));
+});
+```
+
+Le test échoue, car aucune erreur n'est levée.
+
+**Vert**
+
+Dans `account.ts`, importez `NightWithdrawalLimitExceededError`, et ajoutez avant la classe :
+
+```typescript
+const nightWithdrawalLimit = new Amount(500);
+```
+
+Et, dans `withdraw`, juste avant d'ajouter l'opération :
+
+```typescript
+    if (date.getUTCHours() >= 22 && amount.isGreaterThan(nightWithdrawalLimit)) {
+      throw new NightWithdrawalLimitExceededError(nightWithdrawalLimit);
+    }
+```
+
+Les 15 tests du domaine passent.
+
+#### La nuit continue après minuit
+
+**Rouge**
+
+```typescript
+test("a withdrawal is refused when above the night limit, before dawn", () => {
+  const account = new Account(id, []);
+  account.deposit(new Amount(1000), date);
+  const beforeDawn = new Date("2021-01-10T05:59:00Z");
+
+  expect(() => account.withdraw(new Amount(500.01), beforeDawn)).toThrow(NightWithdrawalLimitExceededError);
+});
+```
+
+Le test échoue : à 5h59, l'heure n'est pas supérieure à 22.
+
+**Vert**
+
+Ajoutez à `Account` :
+
+```typescript
+  private isNight(date: Date): boolean {
+    const hour = date.getUTCHours();
+
+    return hour >= 22 || hour < 6;
+  }
+```
+
+Et remplacez la condition dans `withdraw` :
+
+```typescript
+    if (this.isNight(date) && amount.isGreaterThan(nightWithdrawalLimit)) {
+```
+
+Le nouveau test passe, mais 3 tests de la limite sur 24 heures échouent : `date` vaut minuit dans `account.test.ts`, et ces retraits ont maintenant lieu en pleine nuit. La règle est bonne, c'est la donnée de test qui ne convient plus. Placez `date` à midi :
+
+```typescript
+const date = new Date("2021-01-10T12:00:00Z");
+```
+
+Les 16 tests du domaine passent.
+
+#### À 6 heures, la nuit est finie
+
+Ce cas est déjà couvert par le cycle précédent : le test passera du premier coup, et il ne pilote aucun code. On sort donc du TDD le temps d'un test, pour fixer ce comportement à la limite.
+
+```typescript
+test("a withdrawal is accepted above the night limit, at dawn", () => {
+  const account = new Account(id, []);
+  account.deposit(new Amount(1000), date);
+  const dawn = new Date("2021-01-10T06:00:00Z");
+
+  account.withdraw(new Amount(600), dawn);
+
+  expect(account.balance).toEqual(new Amount(400));
+});
+```
+
+Un test qui n'a jamais échoué ne prouve rien. Vérifiez qu'il peut échouer en remplaçant temporairement `hour < 6` par `hour <= 6` : le test échoue. Remettez `hour < 6`. Les 17 tests du domaine passent.
+
+#### 22 heures, dans quel fuseau ?
+
+L'horloge renvoie de l'UTC : ici, la nuit commence à 22 heures UTC, soit à 23 heures à Paris en hiver. Une banque raisonne en heure locale. Pour corriger cela, le domaine devrait connaître le fuseau de la banque : une règle métier de plus, qui se teste de la même façon. On s'arrête ici pour ce guide, mais la question mérite d'être posée pendant la présentation.
+
+### Traduire le refus dans l'API
+
+Le contrôleur ne connaît que le refus pour solde insuffisant : un retrait au-dessus d'une limite provoquerait une erreur 500. Plutôt que de traiter chaque règle à part, les refus partagent un parent : le contrôleur n'a pas à connaître chaque raison de refus.
+
+Créez `packages/domain/src/models/withdrawalRefusedError.ts` :
+
+```typescript
+export abstract class WithdrawalRefusedError extends Error {
+}
+```
+
+Remplacez le parent des erreurs :
+
+```typescript
+import { WithdrawalRefusedError } from "./withdrawalRefusedError.ts";
+import type { Amount } from "./amount.ts";
+
+export class InsufficientFundsError extends WithdrawalRefusedError {
+  constructor(balance: Amount) {
+    super(`Insufficient funds: the balance is ${balance.value}.`);
+  }
+}
+```
+
+```typescript
+import { WithdrawalRefusedError } from "./withdrawalRefusedError.ts";
+import type { Amount } from "./amount.ts";
+
+export class WithdrawalLimitExceededError extends WithdrawalRefusedError {
+  constructor(limit: Amount) {
+    super(`Withdrawal limit exceeded: at most ${limit.value} can be withdrawn over 24 hours.`);
+  }
+}
+```
+
+```typescript
+import { WithdrawalRefusedError } from "./withdrawalRefusedError.ts";
+import type { Amount } from "./amount.ts";
+
+export class NightWithdrawalLimitExceededError extends WithdrawalRefusedError {
+  constructor(limit: Amount) {
+    super(`Night withdrawal limit exceeded: at most ${limit.value} can be withdrawn between 22:00 and 06:00.`);
+  }
+}
+```
+
+Le domaine n'expose que ce qui est dans `src/index.ts`. Ajoutez-y les nouvelles erreurs :
+
+```typescript
+export { NightWithdrawalLimitExceededError } from "./models/nightWithdrawalLimitExceededError.ts";
+export { WithdrawalLimitExceededError } from "./models/withdrawalLimitExceededError.ts";
+export { WithdrawalRefusedError } from "./models/withdrawalRefusedError.ts";
+```
+
+Dans `accountsController.ts`, remplacez `InsufficientFundsError` par `WithdrawalRefusedError`, dans l'import et dans le `catch` :
+
+```typescript
+      if (error instanceof WithdrawalRefusedError) {
+```
+
+Vérifiez-le à la main, avec l'API démarrée. Le compte 1 contient 2500 : déposez 1000, puis retirez 2501.
+
+```bash
+curl -X POST http://localhost:5122/accounts/1/deposits \
+  -H "Content-Type: application/json" \
+  -d '{ "amount": 1000 }'
+
+curl -X POST http://localhost:5122/accounts/1/withdrawals \
+  -H "Content-Type: application/json" \
+  -d '{ "amount": 2501 }'
+```
+
+L'API répond `422` avec le message de la limite, ou de la limite de nuit si vous êtes entre 22 heures et 6 heures UTC. `supabase db reset` remet la base dans son état initial.
+
+Lancez `npm test` : les 23 tests passent.
+
+### Et avec des Seams ?
+
+Au premier jour, il aurait fallu reprendre les Seams de la deuxième partie de l'étape 3, et simuler dans une sous-classe de test le stockage et l'heure de chaque opération. Ici, il n'y en a aucun, pour aucune des deux règles : l'heure et les données sont déjà à l'extérieur du domaine.
+
+---
+
+## Étape 3 : Un nouveau point d'entrée, l'écran du DAB
+
+Un adapter entrant de plus, branché sur les mêmes ports que le contrôleur. Les tests pilotent l'écran avec les adapters en mémoire : pas de base, et pas de console à simuler.
+
+L'écran lit une suite de lignes, et écrit par une fonction qu'on lui donne : `console.log` en production, un tableau dans les tests.
+
+Créez `packages/adapter-cli/package.json` :
+
+```json
+{
+  "name": "@bank/adapter-cli",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bank/adapter-supabase": "*",
+    "@bank/adapter-time": "*",
+    "@bank/domain": "*"
+  }
+}
+```
+
+Lancez `npm install`.
+
+Les tests de l'écran réutilisent les adapters en mémoire du domaine, en important directement leurs fichiers depuis `packages/domain/tests`.
+
+### Déposer
+
+**Rouge**
+
+Créez `packages/adapter-cli/src/atmScreen.ts`, sans aucune logique pour l'instant :
+
+```typescript
+import type { AccountId, ForDepositing, ForPrintingStatements, ForWithdrawing } from "@bank/domain";
+
+export class AtmScreen {
+  private readonly accountId: AccountId;
+  private readonly depositing: ForDepositing;
+  private readonly withdrawing: ForWithdrawing;
+  private readonly printingStatements: ForPrintingStatements;
+  private readonly input: AsyncIterable<string> | Iterable<string>;
+  private readonly output: (line: string) => void;
+
+  constructor(
+    accountId: AccountId,
+    depositing: ForDepositing,
+    withdrawing: ForWithdrawing,
+    printingStatements: ForPrintingStatements,
+    input: AsyncIterable<string> | Iterable<string>,
+    output: (line: string) => void
+  ) {
+    this.accountId = accountId;
+    this.depositing = depositing;
+    this.withdrawing = withdrawing;
+    this.printingStatements = printingStatements;
+    this.input = input;
+    this.output = output;
+  }
+
+  async run(): Promise<void> {
+  }
+}
+```
+
+Créez `packages/adapter-cli/src/main.ts` :
+
+```typescript
+import { createInterface } from "node:readline";
+import { SupabaseOperations } from "@bank/adapter-supabase";
+import { SystemClock } from "@bank/adapter-time";
+import { AccountId, AccountService } from "@bank/domain";
+import { AtmScreen } from "./atmScreen.ts";
+
+const operations = new SupabaseOperations(process.env.SUPABASE_URL!, process.env.SUPABASE_KEY!);
+const service = new AccountService(operations, new SystemClock());
+
+const screen = new AtmScreen(
+  new AccountId(Number(process.argv[2])),
+  service,
+  service,
+  service,
+  createInterface({ input: process.stdin }),
+  console.log
+);
+
+console.log("Commands: deposit <amount>, withdraw <amount>, statement, quit");
+await screen.run();
+```
+
+Comme `app.ts` dans l'API, c'est le seul endroit qui connaît le service : `AccountService` implémente les trois ports, et il les remplit tous les trois.
+
+Créez `packages/adapter-cli/tests/atmScreen.test.ts` :
+
+```typescript
+import { beforeEach, expect, test } from "vitest";
+import { AccountId, AccountService, Amount } from "@bank/domain";
+import { FixedClock } from "../../domain/tests/fixedClock.ts";
+import { InMemoryOperations } from "../../domain/tests/inMemoryOperations.ts";
+import { AtmScreen } from "../src/atmScreen.ts";
+
+const id = new AccountId(1);
+const now = new Date("2021-01-10T00:00:00Z");
+
+let operations: InMemoryOperations;
+
+beforeEach(() => {
+  operations = new InMemoryOperations();
+});
+
+async function run(...commands: string[]): Promise<string[]> {
+  const output: string[] = [];
+  const service = new AccountService(operations, new FixedClock(now));
+  const screen = new AtmScreen(id, service, service, service, commands, (line) => output.push(line));
+
+  await screen.run();
+
+  return output;
+}
+
+test("a deposit increases the balance", async () => {
+  await run("deposit 100");
+
+  const account = await operations.accountOf(id);
+  expect(account.balance).toEqual(new Amount(100));
+});
+```
+
+Le test échoue : le solde vaut 0.
+
+**Vert**
+
+Remplacez `atmScreen.ts` :
+
+```typescript
+import { Amount } from "@bank/domain";
+import type { AccountId, ForDepositing, ForPrintingStatements, ForWithdrawing } from "@bank/domain";
+
+function parseAmount(value: string): Amount {
+  return new Amount(Number(value));
+}
+
+export class AtmScreen {
+  private readonly accountId: AccountId;
+  private readonly depositing: ForDepositing;
+  private readonly withdrawing: ForWithdrawing;
+  private readonly printingStatements: ForPrintingStatements;
+  private readonly input: AsyncIterable<string> | Iterable<string>;
+  private readonly output: (line: string) => void;
+
+  constructor(
+    accountId: AccountId,
+    depositing: ForDepositing,
+    withdrawing: ForWithdrawing,
+    printingStatements: ForPrintingStatements,
+    input: AsyncIterable<string> | Iterable<string>,
+    output: (line: string) => void
+  ) {
+    this.accountId = accountId;
+    this.depositing = depositing;
+    this.withdrawing = withdrawing;
+    this.printingStatements = printingStatements;
+    this.input = input;
+    this.output = output;
+  }
+
+  async run(): Promise<void> {
+    for await (const line of this.input) {
+      if (line === "quit") {
+        break;
+      }
+
+      const [command, value] = line.split(" ");
+
+      switch (command) {
+        case "deposit":
+          await this.depositing.deposit(this.accountId, parseAmount(value));
+          break;
+      }
+    }
+  }
+}
+```
+
+Le test passe.
+
+### Retirer
+
+**Rouge**
+
+Ajoutez ce test à `atmScreen.test.ts` :
+
+```typescript
+test("a withdrawal decreases the balance", async () => {
+  await run("deposit 100", "withdraw 30");
+
+  const account = await operations.accountOf(id);
+  expect(account.balance).toEqual(new Amount(70));
+});
+```
+
+Le test échoue : le solde vaut 100.
+
+**Vert**
+
+Ajoutez ce cas au `switch` :
+
+```typescript
+        case "withdraw":
+          await this.withdrawing.withdraw(this.accountId, parseAmount(value));
+          break;
+```
+
+Les 2 tests passent.
+
+### Afficher un refus
+
+**Rouge**
+
+```typescript
+test("a refused withdrawal displays the reason", async () => {
+  const output = await run("withdraw 30");
+
+  expect(output.join("\n")).toContain("Insufficient funds");
+});
+```
+
+Le test échoue : l'erreur n'est pas interceptée.
+
+**Vert**
+
+Remplacez le cas `withdraw` :
+
+```typescript
+        case "withdraw":
+          await this.withdraw(parseAmount(value));
+          break;
+```
+
+Importez `WithdrawalRefusedError`, et ajoutez à `AtmScreen` :
+
+```typescript
+  private async withdraw(amount: Amount): Promise<void> {
+    try {
+      await this.withdrawing.withdraw(this.accountId, amount);
+    } catch (error) {
+      if (error instanceof WithdrawalRefusedError) {
+        this.output(error.message);
+      } else {
+        throw error;
+      }
+    }
+  }
+```
+
+Les 3 tests passent. Grâce à `WithdrawalRefusedError`, l'écran affiche aussi les refus des deux limites.
+
+### Afficher le relevé et le solde
+
+**Rouge**
+
+```typescript
+test("the statement displays the operations and the balance", async () => {
+  const output = await run("deposit 100", "statement");
+
+  expect(output).toEqual(["2021-01-10 | 100 | 100", "Balance: 100"]);
+});
+```
+
+Le test échoue : l'écran n'affiche rien.
+
+**Vert**
+
+Ajoutez ce cas au `switch` :
+
+```typescript
+        case "statement":
+          await this.printStatement();
+          break;
+```
+
+Et ajoutez à `AtmScreen` :
+
+```typescript
+  private async printStatement(): Promise<void> {
+    const statement = await this.printingStatements.printStatement(this.accountId);
+
+    for (const line of statement) {
+      this.output(`${line.date.toISOString().slice(0, 10)} | ${line.amount.value} | ${line.balance.value}`);
+    }
+
+    this.output(`Balance: ${(statement[0]?.balance ?? Amount.zero).value}`);
+  }
+```
+
+Les 4 tests passent.
+
+### Utiliser l'écran
+
+L'écran lit le même `.env` que l'API. Ajoutez ce script au `package.json` de la racine :
+
+```json
+    "atm": "node --env-file=.env packages/adapter-cli/src/main.ts",
+```
+
+Lancez l'écran sur le compte 1 :
+
+```bash
+npm run --silent atm -- 1
+```
+
+```text
+Commands: deposit <amount>, withdraw <amount>, statement, quit
+statement
+2021-01-20 | -500 | 2500
+2021-01-15 | 2000 | 3000
+2021-01-10 | 1000 | 1000
+Balance: 2500
+quit
+```
+
+Lancez `npm test` : les 27 tests passent.
+
+Combien de lignes du domaine avez-vous modifiées ? Aucune : l'écran appelle les mêmes ports entrants que le contrôleur.
+
+---
+
+## Pour aller plus loin : Un contrat pour les adapters
+
+`InMemoryOperations` remplace la vraie base dans la plupart des tests. S'il ne se comporte pas comme `SupabaseOperations`, ces tests passent pour de mauvaises raisons. Un test de contrat écrit une seule fois ce qu'on attend d'un port, et s'exécute sur chacun de ses adapters.
+
+**Rouge**
+
+Créez `packages/adapter-supabase/tests/operationsContract.ts` : ce fichier décrit le contrat, sans l'exécuter.
+
+```typescript
+import { expect, test } from "vitest";
+import { Amount } from "@bank/domain";
+import type { AccountId, Operations } from "@bank/domain";
+
+const firstDate = new Date("2021-01-10T12:00:00Z");
+const secondDate = new Date("2021-01-11T12:00:00Z");
+
+export function operationsContract(createOperations: () => Operations, accountId: AccountId): void {
+  async function deposit(operations: Operations, amount: Amount, date: Date): Promise<void> {
+    const account = await operations.accountOf(accountId);
+    account.deposit(amount, date);
+    await operations.save(account);
+  }
+
+  test("an account without operations has an empty history", async () => {
+    const account = await createOperations().accountOf(accountId);
+
+    expect(account.history).toEqual([]);
+  });
+
+  test("saved operations are in the history", async () => {
+    const operations = createOperations();
+    await deposit(operations, new Amount(100), firstDate);
+
+    const account = await operations.accountOf(accountId);
+
+    expect(account.history).toEqual([{ amount: new Amount(100), date: firstDate }]);
+  });
+
+  test("saving only adds the new operations", async () => {
+    const operations = createOperations();
+    await deposit(operations, new Amount(100), firstDate);
+    await deposit(operations, new Amount(50), secondDate);
+
+    const account = await operations.accountOf(accountId);
+
+    expect(account.history.map((operation) => operation.amount)).toEqual([new Amount(100), new Amount(50)]);
+  });
+
+  test("the history is sorted by date", async () => {
+    const operations = createOperations();
+    await deposit(operations, new Amount(50), secondDate);
+    await deposit(operations, new Amount(100), firstDate);
+
+    const account = await operations.accountOf(accountId);
+
+    expect(account.history.map((operation) => operation.date)).toEqual([firstDate, secondDate]);
+  });
+}
+```
+
+Créez `packages/adapter-supabase/tests/operations.test.ts`, qui l'exécute sur les deux adapters :
+
+```typescript
+import { createClient } from "@supabase/supabase-js";
+import { afterEach, beforeEach, describe } from "vitest";
+import { AccountId } from "@bank/domain";
+import { InMemoryOperations } from "../../domain/tests/inMemoryOperations.ts";
+import { SupabaseOperations } from "../src/supabaseOperations.ts";
+import { operationsContract } from "./operationsContract.ts";
+
+const accountId = new AccountId(43);
+
+async function clearOperations(): Promise<void> {
+  const client = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_KEY!);
+
+  const { error } = await client.from("operations").delete().eq("account_id", accountId.value);
+
+  if (error) {
+    throw error;
+  }
+}
+
+describe("in memory operations", () => {
+  operationsContract(() => new InMemoryOperations(), accountId);
+});
+
+describe("Supabase operations", () => {
+  beforeEach(clearOperations);
+  afterEach(clearOperations);
+
+  operationsContract(() => new SupabaseOperations(process.env.SUPABASE_URL!, process.env.SUPABASE_KEY!), accountId);
+});
+```
+
+`the history is sorted by date` échoue, uniquement sur l'adapter en mémoire : Supabase trie les opérations, pas lui.
+
+Le test a trouvé une vraie différence entre les deux adapters. Elle ne se voyait pas, car le relevé trie les opérations lui-même.
+
+**Vert**
+
+Dans `InMemoryOperations`, remplacez `accountOf` :
+
+```typescript
+  async accountOf(accountId: AccountId): Promise<Account> {
+    const operations = this.operations.get(accountId.value) ?? [];
+
+    return new Account(accountId, operations.toSorted((left, right) => left.date.getTime() - right.date.getTime()));
+  }
+```
+
+Les 35 tests passent : les 27 tests précédents, et les 4 tests du contrat sur chacun des 2 adapters.
+
+Un nouvel adapter, par exemple le stockage dans un fichier JSON du défi final, n'aura qu'à rejoindre ce contrat.

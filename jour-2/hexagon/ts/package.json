@@ -1,0 +1,24 @@
+{
+  "name": "bank",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  },
+  "allowScripts": {
+    "fsevents": false
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@bank/adapter-cli",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bank/adapter-supabase": "*",
+    "@bank/adapter-time": "*",
+    "@bank/domain": "*"
+  }
+}
