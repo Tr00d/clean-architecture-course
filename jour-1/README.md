@@ -1,5 +1,8 @@
 # Jour 1 : Qu'est-ce qu'une architecture ?
 
+<img src="../images/splash.jpg" alt="Clean Architecture" width="600">
+
+
 > En binôme, discutez 2 minutes :
 
 - Pour vous, c'est quoi une **architecture** logicielle ?
