@@ -93,13 +93,11 @@ Une architecture **centrée sur le domaine** place le code métier au centre : i
 
 Qu'est-ce que cela change concrètement par rapport au N-tier ? Chaque binôme reçoit une demande d'évolution du Bank Kata :
 
-| Sujet                                                                                                               |
-|---------------------------------------------------------------------------------------------------------------------|
-| La table `operations` est découpée en `deposits` et `withdrawals`, sans que les tests des règles métier ne changent |
-| Le SDK d'accès aux données sort une version majeure qui change la façon d'écrire les requêtes et les modèles        |
-| Les opérations quittent Supabase pour l'API REST d'un autre service de la banque                                    |
-| Une autre équipe veut réutiliser les règles de retrait dans son application, sans embarquer Supabase                |
-| Plus personne ne doit pouvoir appeler le SDK depuis une règle métier, même sous la pression d'une livraison         |
+| Sujet                                                                                                                 |
+|-----------------------------------------------------------------------------------------------------------------------|
+| La table `operations` est découpée en `deposits` et `withdrawals`                                                     |
+| Le SDK Supabase d'accès aux données sort une version majeure qui change la façon d'écrire les requêtes et les modèles |
+| Une autre équipe veut réutiliser les règles de retrait dans son application, sans embarquer Supabase                  |
 
 Pour votre demande :
 
